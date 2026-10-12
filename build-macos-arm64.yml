@@ -1,0 +1,149 @@
+# ============================================================================
+# Darktable-DiVERE —— Apple Silicon (M1/M2/M3/M4, arm64) 云端自动编译
+# ----------------------------------------------------------------------------
+# 这个文件让 GitHub 免费提供的 M1(arm64) 云主机来编译，
+# 因此作者自己【不需要】有任何 Apple Silicon 电脑。
+#
+# 用法（二选一）：
+#   A. 手动：GitHub 仓库页面 -> Actions(动作) -> 左侧选
+#      “Build macOS ARM64 (Apple Silicon)” -> 右侧 “Run workflow”。
+#   B. 自动：以后只要推送一个形如 V5.6.3 的标签(tag)，就会自动编译并
+#      发布到该标签的 Release 页面。
+#
+# 产物：darktable-<版本>-arm64.dmg （适用于 macOS 14 Sonoma 及以上）
+# ============================================================================
+
+name: Build macOS ARM64 (Apple Silicon)
+
+on:
+  workflow_dispatch:
+    inputs:
+      git_ref:
+        description: '要编译的分支或标签（留空 = 最新默认分支；可填 V5.6.2）'
+        required: false
+        default: ''
+      version:
+        description: '版本号（用于 dmg 文件名）'
+        required: true
+        default: '5.6.2'
+      publish_release:
+        description: '编译后是否同时发布到 GitHub Release 页面'
+        required: false
+        type: boolean
+        default: false
+  push:
+    tags:
+      - 'V*'
+      - 'v*'
+
+# 发布到 Release 需要 contents 写权限
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build darktable arm64 .dmg
+    # macos-15 / macos-26 均为 Apple Silicon(arm64) 主机。
+    # 注意不要选带 “-intel” 后缀的镜像（macos-14 镜像已于 2026 年退役）。
+    runs-on: macos-15
+
+    env:
+      # 让产物可在 macOS 14.0 及以上系统运行
+      MACOSX_DEPLOYMENT_TARGET: '14.0'
+      SRC_DIR: ${{ github.workspace }}
+      BUILD_DIR: ${{ github.workspace }}/build
+      INSTALL_PREFIX: ${{ github.workspace }}/build/macosx
+      GENERATOR: Ninja
+      TARGET: skiptest            # 跳过单元测试，仅编译打包
+      CMAKE_BUILD_TYPE: Release
+      # 与 darktable 官方发布包一致的编译选项；开启 GraphicsMagick、关闭 ImageMagick
+      ECO: >-
+        -DBINARY_PACKAGE_BUILD=ON
+        -DBUILD_CURVE_TOOLS=ON
+        -DBUILD_NOISE_TOOLS=ON
+        -DUSE_GRAPHICSMAGICK=ON
+        -DUSE_IMAGEMAGICK=OFF
+
+    steps:
+      - name: 1) 下载源代码
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0          # 完整历史，供版本号生成使用
+          submodules: false
+
+      - name: 1b) 切换到指定分支/标签（若手动填写了）
+        run: |
+          if [ -n "${{ github.event.inputs.git_ref }}" ]; then
+            git checkout "${{ github.event.inputs.git_ref }}"
+          fi
+
+      - name: 2) 初始化子模块（不下载集成测试，节省时间）
+        run: |
+          git submodule init
+          git config submodule.src/tests/integration.update none
+          git submodule update --jobs=4
+
+      - name: 3) 确定版本号，并创建 release-<版本> 标签
+        id: ver
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VER="${{ github.event.inputs.version }}"
+          else
+            # 标签推送：去掉开头的 V 或 v
+            VER="${GITHUB_REF_NAME#V}"
+            VER="${VER#v}"
+          fi
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+          # dmg 打包脚本(4_make_hb_darktable_dmg.sh)只认 release-* 标签，
+          # 这里在本地建一个，使脚本能正确生成 dmg 文件名。
+          git tag "release-$VER" || true
+
+      - name: 4) 安装 Homebrew 依赖
+        run: |
+          brew update > /dev/null || true
+          cd .ci
+          export HOMEBREW_NO_INSTALL_UPGRADE=1
+          # Brewfile 列出了全部依赖（gtk、lensfun、onnxruntime、graphicsmagick 等）
+          brew bundle --verbose || true
+
+          # 为打包重建 GraphicsMagick：禁用动态模块，避免依赖 Homebrew 路径
+          # （与 darktable 官方夜间构建一致；失败不阻断整体编译）
+          export HOMEBREW_NO_INSTALL_FROM_API=1
+          brew developer on || true
+          gm_formula="$(brew edit --quiet --print-path graphicsmagick)"
+          sed 's/--with-modules/--disable-installed/1' "$gm_formula" > gm_formula.tmp
+          mv gm_formula.tmp "$gm_formula"
+          brew reinstall --build-from-source --force --quiet graphicsmagick || true
+
+      - name: 5) 配置 / 编译 / 安装
+        run: ./.ci/ci-script.sh
+
+      - name: 6) 打包成 darktable.app
+        run: ./packaging/macosx/3_make_hb_darktable_package.sh
+
+      - name: 7) 生成 .dmg 安装镜像
+        run: ./packaging/macosx/4_make_hb_darktable_dmg.sh
+
+      - name: 8) 检查产物
+        run: ls -lh build/macosx/*.dmg
+
+      - name: 9) 上传 dmg（在本次运行页面底部 Artifacts 下载）
+        uses: actions/upload-artifact@v4
+        with:
+          name: darktable-${{ steps.ver.outputs.version }}-arm64
+          path: build/macosx/*.dmg
+          retention-days: 30
+
+      - name: 10) 发布到 GitHub Release（标签推送时，或手动勾选时）
+        if: >-
+          github.event_name == 'push' ||
+          (github.event_name == 'workflow_dispatch' &&
+           github.event.inputs.publish_release == 'true')
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: V${{ steps.ver.outputs.version }}
+          target_commitish: ${{ github.sha }}
+          name: Darktable-DiVERE ${{ steps.ver.outputs.version }} (Apple Silicon)
+          files: build/macosx/*.dmg
+          fail_on_unmatched_files: true
+#（注：内容由AI生成）

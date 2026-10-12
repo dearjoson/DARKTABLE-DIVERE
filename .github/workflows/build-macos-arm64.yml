@@ -116,7 +116,11 @@ jobs:
           brew reinstall --build-from-source --force --quiet graphicsmagick || true
 
       - name: 5) 配置 / 编译 / 安装
-        run: ./.ci/ci-script.sh
+        # ci-script.sh 一开头就会检查 build 目录，必须先创建（否则立刻失败退出）
+        run: |
+          cmake -E make_directory "${BUILD_DIR}";
+          cmake -E make_directory "${INSTALL_PREFIX}";
+          ./.ci/ci-script.sh;
 
       - name: 6) 打包成 darktable.app
         run: ./packaging/macosx/3_make_hb_darktable_package.sh
@@ -146,4 +150,3 @@ jobs:
           name: Darktable-DiVERE ${{ steps.ver.outputs.version }} (Apple Silicon)
           files: build/macosx/*.dmg
           fail_on_unmatched_files: true
-#（注：内容由AI生成）

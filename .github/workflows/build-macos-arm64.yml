@@ -116,8 +116,11 @@ jobs:
           brew reinstall --build-from-source --force --quiet graphicsmagick || true
 
       - name: 5) 配置 / 编译 / 安装
-        # ci-script.sh 一开头就会检查 build 目录，必须先创建（否则立刻失败退出）
+        # 作者仓库漏提交了 rawspeed 的 cmake/debug-info.cmake（会导致配置失败），
+        # 这里从 rawspeed 官方仓库补上；再创建 build 目录（ci-script.sh 开头会检查）。
         run: |
+          curl -fsSL https://raw.githubusercontent.com/darktable-org/rawspeed/develop/cmake/debug-info.cmake \
+            -o src/external/rawspeed/cmake/debug-info.cmake
           cmake -E make_directory "${BUILD_DIR}";
           cmake -E make_directory "${INSTALL_PREFIX}";
           ./.ci/ci-script.sh;
